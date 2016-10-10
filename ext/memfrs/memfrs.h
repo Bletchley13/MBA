@@ -113,6 +113,7 @@ typedef struct network_state{
 //public API 
 extern bool memfrs_check_struct_info(void);
 extern bool memfrs_check_network_struct_info(void);
+extern bool memfrs_check_globalvar_info(void);
 extern int memfrs_load_structs( const char* type_filename);
 extern int memfrs_load_network_structs( const char* type_filename);
 extern bool memfrs_kpcr_self_check( uint64_t seg_gs_cpl0 );
