@@ -1184,6 +1184,7 @@ for opt do
     nettramon="yes"
     dba="yes"
     systrace="yes"
+    tracer="yes"
   ;;
   --disable-dift) dift="no"
   ;;

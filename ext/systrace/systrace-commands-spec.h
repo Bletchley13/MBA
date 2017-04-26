@@ -17,7 +17,6 @@
  * You should have received a copy of the GNU Lesser General Public
  * License along with this library; if not, see <http://www.gnu.org/licenses/>.
  */
- // TODO: add some commands
 
 {
         .name      = "mba_add_systrace",
@@ -32,5 +31,12 @@
         .params    = "id",
         .help      = "Delete the syscall tracer with given id",
         .mhandler.cmd = do_delete_systrace,
+},
+{
+        .name      = "mba_list_systrace",
+        .args_type = "",
+        .params    = "",
+        .help      = "List all systrace",
+        .mhandler.cmd = do_list_systrace,
 },
 

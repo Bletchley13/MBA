@@ -59,7 +59,7 @@ typedef void ( *systrace_cb )( X86CPU*, bool is_invoke, void* args );
 ///     \param  cb_args  argument for the given callback routine, simply copy by value
 ///
 /// Return a new systrace descriptor on success, otherwise -1 is returned and the systrace_errno is set
-extern int systrace_add( target_ulong cr3, int syscall, systrace_cb callback, void *cb_args );
+extern int systrace_add( const char* label, target_ulong cr3, int syscall, systrace_cb callback, void *cb_args );
 
 /// Delete a system call trace, given handle from systrace_add
 ///
@@ -68,4 +68,8 @@ extern int systrace_add( target_ulong cr3, int syscall, systrace_cb callback, vo
 /// Return 0 on success, otherwise -1 is returned and the systrace_errno is set
 extern int systrace_delete( int systrace_handle );
 
+/// List all the trace
+///
+/// Return 0 on success, otherwise -1 is returned and the systrace_errno is set
+extern int systrace_list(void);
 #endif

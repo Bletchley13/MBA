@@ -25,6 +25,7 @@
 #include "ext/obhook/obhook.h"
 
 #define MAX_NM_SYSTRACE 65536
+#define MAX_SZ_SYSTRACE_LABEL 16
 
 #define SUCCEED() do{return 0;}while( 0 )
 // XXX: INVALID_HANDLE also -1, implicit mix used
@@ -33,6 +34,11 @@
 SYSTRACE_ERRNO systrace_errno;
 
 typedef struct systrace_record{
+    int id;
+
+    // Label for user to reconize the systrace
+    char label[MAX_SZ_SYSTRACE_LABEL];
+
     // the number of the system call to trace
     int           syscall_number;
 
@@ -59,9 +65,11 @@ struct {
 
 } sys_ctx[1];
 
-static systrace_record *new_record( target_ulong cr3, int syscall_number, systrace_cb callback, void *cb_args ) {
+static systrace_record *new_record( int id, const char* label, target_ulong cr3, int syscall_number, systrace_cb callback, void *cb_args ) {
     systrace_record *rec = ( systrace_record* )calloc( 1, sizeof(systrace_record) );
     if( rec ) {
+        rec->id = id;
+        strncpy( rec->label, label, MAX_SZ_SYSTRACE_LABEL );
         rec->syscall_number = syscall_number;
         rec->callback = callback;
         rec->cr3 = cr3;
@@ -93,7 +101,7 @@ static void event_callret( CPUX86State *env, bool is_enter ) {
     }
 }
 
-extern int systrace_add( target_ulong target_cr3, int target_syscall_number, systrace_cb callback, void* cb_args ) {
+extern int systrace_add( const char* label, target_ulong target_cr3, int target_syscall_number, systrace_cb callback, void* cb_args ) {
     int new_handle;
     systrace_record *rec;
 
@@ -106,7 +114,7 @@ extern int systrace_add( target_ulong target_cr3, int target_syscall_number, sys
         FAIL( SYSTRACE_ERR_FULL_TRACE );
 
     // alloc new record
-    rec = new_record( target_cr3, target_syscall_number, callback, cb_args );
+    rec = new_record( new_handle, label, target_cr3, target_syscall_number, callback, cb_args );
     if( rec == NULL )
         FAIL( SYSTRACE_ERR_CREATE_FAIL );
 
@@ -144,6 +152,19 @@ extern int systrace_delete( int systrace_handle ) {
     // record not in list
     FAIL( SYSTRACE_ERR_INTERNAL_BROKEN );
 }
+
+extern int systrace_list(void) {
+    systrace_record *rec;
+    systrace_record *tmp;
+ 
+    printf("List all systrace\n");
+    LL_FOREACH_SAFE( sys_ctx->ll_records, rec, tmp ) {
+        printf("\tID: %d, LABEL: %s, SYSNUM: %d, CR3: %016lx, CB: %p\n", 
+              rec->id, rec->label, rec->syscall_number, rec->cr3, rec->callback);
+    }
+    SUCCEED();
+}
+
 
 // private api for implementation
 extern void systrace_on_syscall( CPUX86State *env ) {

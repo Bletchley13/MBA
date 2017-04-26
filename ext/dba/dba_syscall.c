@@ -183,7 +183,7 @@ static void *cb_hook_syscall_for_under_creation_process( void *cpu ) {
             continue;
 
         // register syscall trace for all syscall for process 'cr3'
-        task->systrace_handle = systrace_add( cr3, task->syscall_number, task->callback, task->jo_arr_out );
+        task->systrace_handle = systrace_add( "dba systrace", cr3, task->syscall_number, task->callback, task->jo_arr_out );
         if( task->systrace_handle == INVALID_HANDLE ) {
             // TODO: generate specific error msg here
             json_object_array_add( task->jo_arr_out, json_object_new_string("failed to add systrace callback at MmCreatePeb called") );
