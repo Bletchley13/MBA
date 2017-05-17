@@ -264,6 +264,170 @@ bool memfrs_kpcr_self_check( uint64_t kpcr_ptr ) {
 
 
 
+/*****************************************************************
+float memfrs_get_windows_version( uint64_t kpcr_ptr, CPUState *cpu )
+
+Guess windows version
+
+INPUT:     uint64_t kpcr_ptr,        the address of _KPCR struct
+           CPUState *cpu,            the pointer to current cpu
+OUTPUT:    float                     windows version
+*******************************************************************/
+float memfrs_get_windows_version( uint64_t kpcr_ptr, CPUState *cpu )
+{
+    float version;
+    json_object *struct_type;
+    json_object *gvar = NULL;
+    field_info *info = NULL;
+
+
+    // Check if the data structure information is loaded
+    if(g_struct_info == NULL)
+    {
+        memfrs_errno = MEMFRS_ERR_NOT_LOADED_STRUCTURE;
+        return -1.0;
+    }
+    //Check if the data structure information is loaded
+    if(g_struct_info == NULL)
+    {
+        memfrs_errno = MEMFRS_ERR_NOT_LOADED_GLOBAL_STRUCTURE;
+        return -1.0;
+    }
+
+    //Check if kpcr is already found
+    if(kpcr_ptr == 0)
+    {
+        memfrs_errno = MEMFRS_ERR_NOT_FOUND_KPCR;
+        return -1.0;
+    }
+
+    //Check the cpu pointer valid
+    if(cpu == NULL)
+    {
+        memfrs_errno = MEMFRS_ERR_INVALID_CPU;
+        return -1.0;
+    }
+
+
+    version = 5.2;
+
+
+    /* Followed Rekall "https://github.com/google/rekall/blob/master/rekall-core/rekall/plugins/overlays/windows/windows.py#L57"
+     * Rekall is moving away from having features keyed by version, rather we
+     * use the profile to dictate the algorithms to use. In future we will
+     * remove all requirement to know the windows version, but for now we
+     * just guess the version based on structures which are known to exist in
+     * the profile.
+     */
+
+
+    // Windows 7 introduces TypeIndex into the object header.
+    if( (struct_type = memfrs_q_struct("_OBJECT_HEADER")) != NULL && (info = memfrs_q_field(struct_type, "TypeIndex")) != NULL ){
+
+        // Windows 10 introduces a cookie for object types.
+        gvar = memfrs_q_globalvar("ObHeaderCookie");
+        if( gvar != NULL )
+            version = 10.0;
+
+        // Windows 7
+        else if( (struct_type = memfrs_q_struct("_EPROCESS")) != NULL &&
+                 (info = memfrs_q_field(struct_type, "VadRoot.BalancedRoot")) != NULL &&
+                 (strcmp(info->type_name, "_MMADDRESS_NODE")==0) )
+            version = 6.1;
+
+        // Windows 8 uses _MM_AVL_NODE as the VAD traversor struct.
+        else if( (struct_type = memfrs_q_struct("_EPROCESS")) != NULL &&
+                 (info = memfrs_q_field(struct_type, "VadRoot")) != NULL &&
+                 (strcmp(info->type_name, "_MM_AVL_TABLE")==0) )
+            version = 6.2;
+
+        // Windows 8.1 and on uses _RTL_AVL_TREE
+        else if( (struct_type = memfrs_q_struct("_EPROCESS")) != NULL &&
+                 (info = memfrs_q_field(struct_type, "VadRoot")) != NULL &&
+                 (strcmp(info->type_name, "_RTL_AVL_TREE")==0) )
+            version = 6.3;
+
+        // Unknown windows version
+        else
+            version = 0.0;
+    }
+
+    // Windows XP did not use a BalancedRoot for VADs.
+    else if( (struct_type = memfrs_q_struct("_MM_AVL_TABLE")) != NULL && (info = memfrs_q_field(struct_type, "BalancedRoot")) == NULL )
+        version = 5.1;
+
+    else
+        version = 0.0;
+
+
+    return version;
+}
+
+
+
+/*******************************************************************
+current_thread *memfrs_get_current_thread(void)
+
+Get current thread datas
+
+INPUT:    CPUState *cpu
+OUTPUT:   current_thread*           current_thread
+*******************************************************************/
+current_thread *memfrs_get_current_thread( CPUState *cpu)
+{
+    current_thread *thread_data=NULL;
+    uint64_t thread_ptr,
+             _CLIENT_ID_ptr,
+             eprocess_ptr,
+             pid_ptr,
+             tid_ptr;
+    uint64_t pid, tid;
+    uint8_t image_file_name[16];        // Max size of image name in _EPROCESS is 16
+
+    json_object *struct_type;
+    field_info *info = NULL;
+
+    if(g_kpcr_ptr){
+        // Get Current thread address
+        memfrs_get_mem_struct_content( cpu, 0, (uint8_t*)&thread_ptr, sizeof(thread_ptr), g_kpcr_ptr, false, "_KPCR", 2, "*CurrentPrcb", "*CurrentThread");
+
+        // Get address of PID and TID
+        struct_type = memfrs_q_struct("_ETHREAD");
+        if (struct_type == NULL)
+            return NULL;
+        info = memfrs_q_field(struct_type, "Cid");
+        _CLIENT_ID_ptr = thread_ptr + info->offset;
+
+        struct_type = memfrs_q_struct("_CLIENT_ID");
+        if (struct_type == NULL)
+            return NULL;
+        info = memfrs_q_field(struct_type, "UniqueProcess");
+        pid_ptr = _CLIENT_ID_ptr + info->offset;
+        info = memfrs_q_field(struct_type, "UniqueThread");
+        tid_ptr = _CLIENT_ID_ptr + info->offset;
+
+        // Get PID and TID
+        memfrs_get_virmem_content(cpu, 0, pid_ptr, sizeof(pid), (uint8_t*)&pid);
+        memfrs_get_virmem_content(cpu, 0, tid_ptr, sizeof(tid), (uint8_t*)&tid);
+
+        // Get current image name
+        memfrs_get_mem_struct_content( cpu, 0, (uint8_t*)&eprocess_ptr, sizeof(eprocess_ptr), thread_ptr, false, "_KTHREAD", 1, "*Process");
+        memfrs_get_mem_struct_content( cpu, 0, (uint8_t*)&image_file_name, sizeof(image_file_name), eprocess_ptr, false, "_EPROCESS", 1, "*ImageFileName");
+        image_file_name[15]='\0';
+
+        // Set values in return structure
+        thread_data = (current_thread*)malloc(sizeof(current_thread));
+        thread_data->image_file_name = (char*)malloc(16);
+        thread_data->unique_thread = tid;
+        thread_data->unique_process = pid;
+        sprintf(thread_data->image_file_name, "%s", image_file_name);
+    }
+
+    return thread_data;
+}
+
+
+
 UT_icd adr_icd = {sizeof(uint64_t), NULL, NULL, NULL };
 /*******************************************************************
 UT_array* memfrs_scan_virmem( CPUState *cpu, uint64_t start_addr, uint64_t end_addr, const char* pattern, int length ) {
