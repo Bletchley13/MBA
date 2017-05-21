@@ -23,6 +23,7 @@
 #include "utlist.h"
 #include "utarray.h"
 #include "ext/obhook/obhook.h"
+#include "ext/memfrs/ssdt.h"
 
 #define MAX_NM_SYSTRACE 65536
 #define MAX_SZ_SYSTRACE_LABEL 16
@@ -30,6 +31,7 @@
 #define SUCCEED() do{return 0;}while( 0 )
 // XXX: INVALID_HANDLE also -1, implicit mix used
 #define FAIL( x ) do{systrace_errno = x; return -1;}while( 0 )
+
 
 SYSTRACE_ERRNO systrace_errno;
 
@@ -48,6 +50,8 @@ typedef struct systrace_record{
     // target cr3, trace all process if CR3_ALL
     target_ulong  cr3;
 
+    bool is_entry;
+
     // user argument for callback
     void         *cb_args;
 
@@ -60,12 +64,28 @@ struct {
     // table of records, NULL if not occupied
     systrace_record *records[MAX_NM_SYSTRACE];
 
+    pthread_rwlock_t rwlock;
+
+    syscall_context* g_syscall_ctx;
+
+    UT_array* g_ssdt_info;
+
     // linked list of records
     systrace_record *ll_records;
 
-} sys_ctx[1];
+} sys_ctx[1] = {
+  {
+    .records = {NULL},
+    .rwlock = PTHREAD_RWLOCK_INITIALIZER,
+    .g_syscall_ctx = NULL,
+    .g_ssdt_info = NULL, 
+    .ll_records = NULL
+  }
+};
 
-static systrace_record *new_record( int id, const char* label, target_ulong cr3, int syscall_number, systrace_cb callback, void *cb_args ) {
+UT_icd uint64_icd = {sizeof(uint64_t), NULL, NULL, NULL };
+
+static systrace_record *new_record( int id, const char* label, target_ulong cr3, int syscall_number, bool is_entry, systrace_cb callback, void *cb_args ) {
     systrace_record *rec = ( systrace_record* )calloc( 1, sizeof(systrace_record) );
     if( rec ) {
         rec->id = id;
@@ -74,8 +94,61 @@ static systrace_record *new_record( int id, const char* label, target_ulong cr3,
         rec->callback = callback;
         rec->cr3 = cr3;
         rec->cb_args = cb_args;
+        rec->is_entry = is_entry;
     }
     return rec;
+}
+
+static syscall_context* gen_syscall_context(int syscall_number, CPUX86State *env){
+    X86CPU *x86cpu = ( X86CPU* )x86_env_get_cpu( env );
+    UT_array *arg_arr = NULL;
+    current_thread* thread;
+    uint64_t context_idx;
+    syscall_context* syscall_ctx;
+    ssdt_list_st* ssdt_elt = (ssdt_list_st*)utarray_eltptr(sys_ctx->g_ssdt_info, syscall_number);
+
+    utarray_new(arg_arr, &uint64_icd);
+    
+    // Calculate context
+    thread = memfrs_get_current_thread(CPU(x86cpu));
+    context_idx = (env->cr[3] << (32-12)) | thread->unique_thread ;
+    free(thread);
+
+    syscall_ctx = (syscall_context*)malloc(sizeof(syscall_context));
+    syscall_ctx->context_key = context_idx;
+    syscall_ctx->syscall_number = syscall_number;
+
+
+    // Retrieve argument in register
+    utarray_push_back(arg_arr, &(x86cpu->env.regs[R_ECX]));
+    utarray_push_back(arg_arr, &(x86cpu->env.regs[R_EDX]));
+    utarray_push_back(arg_arr, &(x86cpu->env.regs[8]));
+    utarray_push_back(arg_arr, &(x86cpu->env.regs[9]));
+
+    if(ssdt_elt!=NULL)
+    {
+        int i;
+        for(i = 0; i < ssdt_elt->argnum_on_stack    ; i++ )
+        {
+            uint64_t v;  
+            memfrs_get_virmem_content(CPU(x86cpu), env->cr[3], x86cpu->env.regs[R_ESP] + 0x28 + i*8, sizeof(uint64_t), (uint8_t*)&v);
+            utarray_push_back(arg_arr, &v);
+        }
+    }
+
+    syscall_ctx->argument_arr = arg_arr;
+
+    return syscall_ctx; 
+}
+
+static int free_context(syscall_context* syscall_ctx)
+{
+    if(syscall_ctx == NULL)
+        return 0;
+    utarray_free(syscall_ctx->argument_arr);
+    HASH_DEL(sys_ctx->g_syscall_ctx, syscall_ctx);
+    free(syscall_ctx);
+    return 0;
 }
 
 // syscall enter/exit event handler
@@ -83,25 +156,61 @@ static void event_callret( CPUX86State *env, bool is_enter ) {
     X86CPU *x86cpu = ( X86CPU* )x86_env_get_cpu( env );
     systrace_record *rec;
     target_ulong syscall_number;
-    
+    uint64_t context_idx;
+    //uint32_t thread_id;
+    current_thread* thread;
+    syscall_context* syscall_ctx;
+
     // get system call number from register
-    syscall_number = env->regs[R_EAX] & 0xffff;
-    
+    syscall_number = env->regs[R_EAX] & 0xffff;    
+
+    //Check memfrs data structure
+    if(!memfrs_check_struct_info() || !memfrs_check_globalvar_info())
+        return;
+
+    if(sys_ctx->g_ssdt_info == NULL){
+        sys_ctx->g_ssdt_info = memfrs_enum_ssdt_list( g_kpcr_ptr , CPU(x86cpu));
+    }
+
+    if(is_enter){
+        syscall_ctx = gen_syscall_context(syscall_number, env);
+
+        HASH_ADD_INT(sys_ctx->g_syscall_ctx, context_key, syscall_ctx);
+    }else{
+        thread = memfrs_get_current_thread(CPU(x86cpu));
+        context_idx = (env->cr[3] << (32-12)) | thread->unique_thread ;
+        free(thread);
+  
+        HASH_FIND_INT(sys_ctx->g_syscall_ctx, &context_idx, syscall_ctx);
+    }
+
     // invoke all callbacks matching cr3 and system call number
     LL_FOREACH( sys_ctx->ll_records, rec ) {
         if( rec->cr3 == CR3_ALL || rec->cr3 == env->cr[3] ) {
-            if (is_enter) {
+            if (is_enter && rec-> is_entry ) {
                 if( rec->syscall_number == SYSCALL_ALL || rec->syscall_number == syscall_number )
-                    rec->callback( x86cpu, true, rec->cb_args );
+                {
+                    rec->callback( x86cpu, true, rec->cb_args, syscall_ctx );
+                    
+                }
             }
-            else {
+            else if(!is_enter && syscall_ctx!=NULL && !rec-> is_entry){
+                 if( rec->syscall_number == SYSCALL_ALL || rec->syscall_number == syscall_ctx->syscall_number)
+                 {
+                     rec->callback( x86cpu, false, rec->cb_args, syscall_ctx );
+                 }               
+
                 // TODO: tell syscall number and call rec->callback
             }
         }
     }
+
+    if(!is_enter){
+        free_context(syscall_ctx);
+    }
 }
 
-extern int systrace_add( const char* label, target_ulong target_cr3, int target_syscall_number, systrace_cb callback, void* cb_args ) {
+extern int systrace_add( const char* label, target_ulong target_cr3, int target_syscall_number, bool is_entry, systrace_cb callback, void* cb_args ) {
     int new_handle;
     systrace_record *rec;
 
@@ -114,13 +223,18 @@ extern int systrace_add( const char* label, target_ulong target_cr3, int target_
         FAIL( SYSTRACE_ERR_FULL_TRACE );
 
     // alloc new record
-    rec = new_record( new_handle, label, target_cr3, target_syscall_number, callback, cb_args );
+    rec = new_record( new_handle, label, target_cr3, target_syscall_number, is_entry, callback, cb_args );
     if( rec == NULL )
         FAIL( SYSTRACE_ERR_CREATE_FAIL );
+
+    pthread_rwlock_wrlock( &sys_ctx->rwlock );
 
     // insert new record into list and occupy a table slot
     LL_APPEND( sys_ctx->ll_records, rec );
     sys_ctx->records[new_handle] = rec;
+
+    pthread_rwlock_unlock( &sys_ctx->rwlock );
+
 
     return new_handle;
 }
@@ -142,7 +256,11 @@ extern int systrace_delete( int systrace_handle ) {
         if( rec != target_rec )
             continue;
 
+        pthread_rwlock_wrlock( &sys_ctx->rwlock );
+
         LL_DELETE( sys_ctx->ll_records, rec );
+
+        pthread_rwlock_unlock( &sys_ctx->rwlock );
 
         sys_ctx->records[systrace_handle] = NULL;
         free( rec );
@@ -177,16 +295,25 @@ extern void systrace_on_sysret( CPUX86State *env ) {
 }
 
 // callback of systrace for dumping general syscall info
-void cb_log_syscall_info( X86CPU *x86cpu, bool is_invoke, void *args ) {
+void cb_log_syscall_info( X86CPU *x86cpu, bool is_invoke, void *args, const syscall_context* syscall_info ) {
     int errcode = 0;
 
-    // write invocation log to 'jo_out'
     if( is_invoke ) {
+        uint64_t* p = NULL;
         printf( "syscall #%04lx invoked\n", x86cpu->env.regs[R_EAX] & 0xffff );
+        printf( "syscall_info #%04x context code %016lx\n", syscall_info->syscall_number, syscall_info->context_key );
+        while( (p=(uint64_t*)utarray_next(syscall_info->argument_arr,p))) 
+              printf("%016lx\n", *p);
+
+    } else {
+        printf( "syscall return\n");
+        printf( "syscall_info #%04x context code %016lx\n", syscall_info->syscall_number, syscall_info->context_key );
     }
+   
 
     if( errcode == -1 ) {
         printf( "syscall hook routine error\n" );
+        //printf( "syscall_info #%04lx context code %016lx\n", syscall_info->context_key, syscall_info->context_key );
     }
 }
 

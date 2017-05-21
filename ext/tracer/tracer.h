@@ -152,6 +152,15 @@ extern char* tracer_get_tracer_label(int uid);
 /// return -1 on error, 1 for enable and 0 for disable
 extern int tracer_get_tracer_status(int uid);
 
+/// uint64_t tracer_get_tracer_cr3(int uid)
+/// Return the cr3 of tracer with uid
+///
+/// \param uid                 the uid of target tracer       
+/// 
+/// return -1 on error, or it's cr3
+extern uint64_t tracer_get_tracer_cr3(int uid);
+
+
 /// int get_error_no(void);
 /// get the error number 
 /// return the int of enum TRACER_ERRNO

@@ -130,6 +130,16 @@ int tracer_get_tracer_status(int uid)
     return rec->enabled;
 }
 
+uint64_t tracer_get_tracer_cr3(int uid)
+{
+    tracer_cb_record* rec = get_tracer(uid);
+    if(rec==NULL)
+    {
+        return -1;
+    }
+    return rec->cr3;
+}
+
 int tracer_disable_tracer(int uid)
 {
     tracer_cb_record* rec = get_tracer(uid);
